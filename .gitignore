@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+*.mp4
+.DS_Store
+.env
+*.db
+*.db-wal
+*.db-shm
+/vanta_bot/
