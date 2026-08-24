@@ -95,6 +95,17 @@ async def init_db():
                 )
                 await db.commit()
 
+        # Bump order numbering so new orders start from #7535 onward
+        order_number_floor = 7534
+        async with db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'orders'") as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            await db.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('orders', ?)", (order_number_floor,))
+            await db.commit()
+        elif row[0] < order_number_floor:
+            await db.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'orders'", (order_number_floor,))
+            await db.commit()
+
         # Re-seed default structure if categories empty
         async with db.execute("SELECT COUNT(*) FROM categories") as cursor:
             count = (await cursor.fetchone())[0]
