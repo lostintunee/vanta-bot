@@ -80,8 +80,9 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ Добавить оффер"), KeyboardButton(text="📁 Добавить категорию")],
-            [KeyboardButton(text="⚙️ Настроить менеджера"), KeyboardButton(text="📢 Рассылка")],
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🏠 Выход из админки")]
+            [KeyboardButton(text="⚙️ Настроить менеджера"), KeyboardButton(text="💳 Реквизиты оплаты")],
+            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="🏠 Выход из админки")]
         ],
         resize_keyboard=True
     )

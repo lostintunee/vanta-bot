@@ -8,7 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from config import ADMIN_IDS, DB_PATH
 from database import (
     get_all_users_count, get_all_user_ids, set_manager_username,
-    get_top_categories, get_manager_username
+    get_top_categories, get_manager_username, get_payment_requisites, set_payment_requisites
 )
 from keyboards import admin_reply_keyboard, main_reply_keyboard
 
@@ -26,6 +26,9 @@ class AddProductState(StatesGroup):
 
 class SetManagerState(StatesGroup):
     username = State()
+
+class SetRequisitesState(StatesGroup):
+    text = State()
 
 class BroadcastState(StatesGroup):
     text = State()
@@ -91,6 +94,32 @@ async def process_set_manager(message: Message, state: FSMContext):
     await set_manager_username(new_username)
     await state.clear()
     await message.answer(f"✅ Менеджер успешно изменен на <code>{html.escape(new_username)}</code>!", reply_markup=admin_reply_keyboard(), parse_mode="HTML")
+
+@router.message(F.text == "💳 Реквизиты оплаты")
+async def start_set_requisites(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.set_state(SetRequisitesState.text)
+    current = await get_payment_requisites()
+    await message.answer(
+        f"💳 Текущие реквизиты:\n<code>{html.escape(current)}</code>\n\n"
+        "Отправьте новый текст реквизитов (кошелёк, карта, банк — что угодно). "
+        "Этот текст будет показываться клиенту при оформлении заказа:",
+        parse_mode="HTML"
+    )
+
+@router.message(SetRequisitesState.text)
+async def process_set_requisites(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    new_text = message.text.strip()
+    await set_payment_requisites(new_text)
+    await state.clear()
+    await message.answer(
+        f"✅ Реквизиты оплаты обновлены:\n<code>{html.escape(new_text)}</code>",
+        reply_markup=admin_reply_keyboard(),
+        parse_mode="HTML"
+    )
 
 @router.message(F.text == "📁 Добавить категорию")
 async def start_add_category(message: Message, state: FSMContext):

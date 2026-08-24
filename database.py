@@ -86,6 +86,15 @@ async def init_db():
                 await db.execute("INSERT INTO settings (key, value) VALUES ('manager_username', ?)", (DEFAULT_MANAGER,))
                 await db.commit()
 
+        async with db.execute("SELECT value FROM settings WHERE key = 'payment_requisites'") as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                await db.execute(
+                    "INSERT INTO settings (key, value) VALUES ('payment_requisites', ?)",
+                    ("Актуальные реквизиты уточняйте у менеджера.",)
+                )
+                await db.commit()
+
         # Re-seed default structure if categories empty
         async with db.execute("SELECT COUNT(*) FROM categories") as cursor:
             count = (await cursor.fetchone())[0]
@@ -421,6 +430,17 @@ async def get_manager_username() -> str:
 async def set_manager_username(username: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('manager_username', ?)", (username,))
+        await db.commit()
+
+async def get_payment_requisites() -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key = 'payment_requisites'") as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else "Актуальные реквизиты уточняйте у менеджера."
+
+async def set_payment_requisites(text: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('payment_requisites', ?)", (text,))
         await db.commit()
 
 async def get_top_categories():
