@@ -206,7 +206,7 @@ async def callback_checkout_cart(callback: CallbackQuery):
         f"✅ <b>Заказ оформлен!</b> ({order_tags})\n\n"
         f"{items_lines}\n\n"
         f"💰 <b>К оплате: {total:.2f}$</b>\n\n"
-        f"💳 <b>Реквизиты для оплаты:</b>\n{html.escape(requisites)}\n\n"
+        f"💳 <b>Реквизиты для оплаты:</b>\n<code>{html.escape(requisites)}</code>\n\n"
         f"После перевода напишите менеджеру для подтверждения: "
         f"<a href='https://t.me/{clean_manager}'>{html.escape(manager)}</a>",
         parse_mode="HTML",
