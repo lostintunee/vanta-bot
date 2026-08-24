@@ -6,7 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from database import (
     get_top_categories, get_subcategories, get_category, get_products_by_category,
     get_product, get_manager_username, search_products, add_to_cart, get_cart_items,
-    clear_cart, add_order, get_payment_requisites
+    clear_cart, add_order, get_payment_label, get_payment_address
 )
 from keyboards import (
     top_categories_keyboard, subcategories_keyboard, products_inline_keyboard,
@@ -201,12 +201,18 @@ async def callback_checkout_cart(callback: CallbackQuery):
 
     manager = await get_manager_username()
     clean_manager = manager.replace("@", "")
-    requisites = await get_payment_requisites()
+    payment_label = await get_payment_label()
+    payment_address = await get_payment_address()
+
+    requisites_block = f"💳 <b>Реквизиты для оплаты:</b>\n{html.escape(payment_label)}"
+    if payment_address:
+        requisites_block += f"\n<code>{html.escape(payment_address)}</code>"
+
     await callback.message.edit_text(
         f"✅ <b>Заказ оформлен!</b> ({order_tags})\n\n"
         f"{items_lines}\n\n"
         f"💰 <b>К оплате: {total:.2f}$</b>\n\n"
-        f"💳 <b>Реквизиты для оплаты:</b>\n<code>{html.escape(requisites)}</code>\n\n"
+        f"{requisites_block}\n\n"
         f"После перевода напишите менеджеру для подтверждения: "
         f"<a href='https://t.me/{clean_manager}'>{html.escape(manager)}</a>",
         parse_mode="HTML",

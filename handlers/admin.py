@@ -8,7 +8,8 @@ from aiogram.fsm.state import State, StatesGroup
 from config import ADMIN_IDS, DB_PATH
 from database import (
     get_all_users_count, get_all_user_ids, set_manager_username,
-    get_top_categories, get_manager_username, get_payment_requisites, set_payment_requisites
+    get_top_categories, get_manager_username, get_payment_label, get_payment_address,
+    set_payment_label, set_payment_address
 )
 from keyboards import admin_reply_keyboard, main_reply_keyboard
 
@@ -28,7 +29,8 @@ class SetManagerState(StatesGroup):
     username = State()
 
 class SetRequisitesState(StatesGroup):
-    text = State()
+    label = State()
+    address = State()
 
 class BroadcastState(StatesGroup):
     text = State()
@@ -99,24 +101,41 @@ async def process_set_manager(message: Message, state: FSMContext):
 async def start_set_requisites(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    await state.set_state(SetRequisitesState.text)
-    current = await get_payment_requisites()
+    await state.set_state(SetRequisitesState.label)
+    current_label = await get_payment_label()
+    current_address = await get_payment_address()
     await message.answer(
-        f"💳 Текущие реквизиты:\n<code>{html.escape(current)}</code>\n\n"
-        "Отправьте новый текст реквизитов (кошелёк, карта, банк — что угодно). "
-        "Этот текст будет показываться клиенту при оформлении заказа:",
+        f"💳 Текущее описание:\n{html.escape(current_label)}\n\n"
+        f"💳 Текущий адрес/номер:\n<code>{html.escape(current_address) or '(не задан)'}</code>\n\n"
+        "Шаг 1/2. Пришлите текст-описание способа оплаты (например: <code>USDT (сеть TRC20 / Tron)</code>, "
+        "можно с любыми пояснениями и предупреждениями). Сам адрес/номер счёта сюда не пишите — его спросим отдельно, "
+        "чтобы клиент мог скопировать одним тапом только его:",
         parse_mode="HTML"
     )
 
-@router.message(SetRequisitesState.text)
-async def process_set_requisites(message: Message, state: FSMContext):
+@router.message(SetRequisitesState.label)
+async def process_set_requisites_label(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    new_text = message.text.strip()
-    await set_payment_requisites(new_text)
+    await state.update_data(label=message.text.strip())
+    await state.set_state(SetRequisitesState.address)
+    await message.answer(
+        "Шаг 2/2. Теперь пришлите сам адрес кошелька / номер карты / счёт — "
+        "именно этот текст будет выделен моноширинным шрифтом и копироваться одним тапом:"
+    )
+
+@router.message(SetRequisitesState.address)
+async def process_set_requisites_address(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    label = data["label"]
+    address = message.text.strip()
+    await set_payment_label(label)
+    await set_payment_address(address)
     await state.clear()
     await message.answer(
-        f"✅ Реквизиты оплаты обновлены:\n<code>{html.escape(new_text)}</code>",
+        f"✅ Реквизиты оплаты обновлены:\n{html.escape(label)}\n<code>{html.escape(address)}</code>",
         reply_markup=admin_reply_keyboard(),
         parse_mode="HTML"
     )

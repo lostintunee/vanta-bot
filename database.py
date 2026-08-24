@@ -86,13 +86,20 @@ async def init_db():
                 await db.execute("INSERT INTO settings (key, value) VALUES ('manager_username', ?)", (DEFAULT_MANAGER,))
                 await db.commit()
 
-        async with db.execute("SELECT value FROM settings WHERE key = 'payment_requisites'") as cursor:
+        async with db.execute("SELECT value FROM settings WHERE key = 'payment_label'") as cursor:
             row = await cursor.fetchone()
             if not row:
-                await db.execute(
-                    "INSERT INTO settings (key, value) VALUES ('payment_requisites', ?)",
-                    ("Актуальные реквизиты уточняйте у менеджера.",)
-                )
+                # Migrate the old single-field value if it exists, so nothing is lost
+                async with db.execute("SELECT value FROM settings WHERE key = 'payment_requisites'") as old_cursor:
+                    old_row = await old_cursor.fetchone()
+                label_default = old_row[0] if old_row else "Актуальные реквизиты уточняйте у менеджера."
+                await db.execute("INSERT INTO settings (key, value) VALUES ('payment_label', ?)", (label_default,))
+                await db.commit()
+
+        async with db.execute("SELECT value FROM settings WHERE key = 'payment_address'") as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                await db.execute("INSERT INTO settings (key, value) VALUES ('payment_address', ?)", ("",))
                 await db.commit()
 
         # Bump order numbering so new orders start from #7535 onward
@@ -443,15 +450,26 @@ async def set_manager_username(username: str):
         await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('manager_username', ?)", (username,))
         await db.commit()
 
-async def get_payment_requisites() -> str:
+async def get_payment_label() -> str:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM settings WHERE key = 'payment_requisites'") as cursor:
+        async with db.execute("SELECT value FROM settings WHERE key = 'payment_label'") as cursor:
             row = await cursor.fetchone()
             return row[0] if row else "Актуальные реквизиты уточняйте у менеджера."
 
-async def set_payment_requisites(text: str):
+async def set_payment_label(text: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('payment_requisites', ?)", (text,))
+        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('payment_label', ?)", (text,))
+        await db.commit()
+
+async def get_payment_address() -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key = 'payment_address'") as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else ""
+
+async def set_payment_address(text: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('payment_address', ?)", (text,))
         await db.commit()
 
 async def get_top_categories():
