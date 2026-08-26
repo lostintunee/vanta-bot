@@ -1,12 +1,13 @@
 import html
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from database import (
     get_top_categories, get_subcategories, get_category, get_products_by_category,
     get_product, get_manager_username, search_products, add_to_cart, get_cart_items,
-    clear_cart, add_order, get_payment_label, get_payment_address
+    clear_cart, add_orders, get_payment_label, get_payment_address
 )
 from keyboards import (
     top_categories_keyboard, subcategories_keyboard, products_inline_keyboard,
@@ -21,11 +22,24 @@ def format_buyer(user) -> str:
     name = html.escape(user.first_name or "Без имени")
     return f"{name} ({handle})"
 
+async def safe_edit(callback: CallbackQuery, text: str, reply_markup=None):
+    """Edit in place, tolerating Telegram's 'message is not modified' complaint.
+
+    Re-tapping a button that leads to the screen already on display (for example
+    'Очистить' on an already-empty cart) would otherwise raise.
+    """
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
+
 class SearchState(StatesGroup):
     waiting_for_query = State()
 
 @router.message(F.text.in_(["🛍 Каталог", "💎 Каталог", "Каталог", "/catalog"]))
-async def show_catalog(message: Message):
+async def show_catalog(message: Message, state: FSMContext):
+    await state.clear()
     categories = await get_top_categories()
     if not categories:
         await message.answer("🛍 <b>Каталог пуст.</b>", parse_mode="HTML")
@@ -38,11 +52,12 @@ async def show_catalog(message: Message):
 
 @router.callback_query(F.data == "back_to_top_cats")
 async def callback_back_to_top_cats(callback: CallbackQuery):
+    await callback.answer()
     categories = await get_top_categories()
-    await callback.message.edit_text(
+    await safe_edit(
+        callback,
         "🛍 <b>Выберите раздел:</b>",
-        reply_markup=top_categories_keyboard(categories),
-        parse_mode="HTML"
+        top_categories_keyboard(categories)
     )
 
 @router.callback_query(F.data.startswith("cat_"))
@@ -53,35 +68,34 @@ async def callback_show_category(callback: CallbackQuery):
         await callback.answer("Раздел не найден", show_alert=True)
         return
 
+    await callback.answer()
     cat_id, cat_name, cat_emoji, parent_id = category
+    cat_header = f"{cat_emoji} {cat_name}" if cat_emoji else cat_name
 
     # Check if this category has subcategories
     subcats = await get_subcategories(cat_id)
     if subcats:
-        cat_header = f"{cat_emoji} {cat_name}" if cat_emoji else cat_name
-        await callback.message.edit_text(
+        await safe_edit(
+            callback,
             f"{html.escape(cat_header)}\nВыберите папку:",
-            reply_markup=subcategories_keyboard(cat_id, subcats),
-            parse_mode="HTML"
+            subcategories_keyboard(cat_id, subcats)
         )
         return
 
     # If no subcategories, load products directly
     products = await get_products_by_category(cat_id)
-    cat_header = f"{cat_emoji} {cat_name}" if cat_emoji else cat_name
-    
     if not products:
-        await callback.message.edit_text(
+        await safe_edit(
+            callback,
             f"{html.escape(cat_header)}\nВ этой папке пока нет товаров.",
-            reply_markup=products_inline_keyboard(parent_id, []),
-            parse_mode="HTML"
+            products_inline_keyboard(parent_id, [])
         )
         return
 
-    await callback.message.edit_text(
+    await safe_edit(
+        callback,
         f"{html.escape(cat_header)}\nВыберите товар:",
-        reply_markup=products_inline_keyboard(parent_id, products),
-        parse_mode="HTML"
+        products_inline_keyboard(parent_id, products)
     )
 
 @router.callback_query(F.data.startswith("prod_"))
@@ -92,6 +106,7 @@ async def callback_show_product(callback: CallbackQuery):
         await callback.answer("Товар не найден", show_alert=True)
         return
 
+    await callback.answer()
     p_id, cat_id, title, desc, price, stock, badge = product
     manager = await get_manager_username()
 
@@ -105,11 +120,7 @@ async def callback_show_product(callback: CallbackQuery):
         f"<b>Наличие:</b> {stock_text}"
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=product_detail_keyboard(p_id, cat_id, manager),
-        parse_mode="HTML"
-    )
+    await safe_edit(callback, text, product_detail_keyboard(p_id, cat_id, manager))
 
 @router.callback_query(F.data.startswith("addcart_"))
 async def callback_add_cart(callback: CallbackQuery):
@@ -150,7 +161,8 @@ async def callback_product_interest(callback: CallbackQuery):
     )
 
 @router.message(F.text.in_(["🛒 Корзина", "Корзина"]))
-async def show_cart(message: Message):
+async def show_cart(message: Message, state: FSMContext):
+    await state.clear()
     user_id = message.from_user.id
     items = await get_cart_items(user_id)
 
@@ -186,7 +198,7 @@ async def callback_checkout_cart(callback: CallbackQuery):
         await callback.answer("Корзина пустая!", show_alert=True)
         return
 
-    order_ids = [await add_order(user_id, p_id) for p_id, _, _ in items]
+    order_ids = await add_orders(user_id, [p_id for p_id, _, _ in items])
     total = sum(item[2] for item in items)
     items_lines = "\n".join(f"• {html.escape(title)} — {price:.2f}$" for _, title, price in items)
     order_tags = ", ".join(f"#{oid}" for oid in order_ids)
@@ -227,11 +239,7 @@ async def callback_clear_cart(callback: CallbackQuery):
     user_id = callback.from_user.id
     await clear_cart(user_id)
     await callback.answer("🗑 Корзина очищена!", show_alert=True)
-    await callback.message.edit_text(
-        "🛒 <b>Корзина пустая.</b>",
-        reply_markup=cart_inline_keyboard(cart_empty=True),
-        parse_mode="HTML"
-    )
+    await safe_edit(callback, "🛒 <b>Корзина пустая.</b>", cart_inline_keyboard(cart_empty=True))
 
 @router.callback_query(F.data == "promocode")
 async def callback_promocode(callback: CallbackQuery):
@@ -245,7 +253,10 @@ async def start_search(message: Message, state: FSMContext):
 
 @router.message(SearchState.waiting_for_query)
 async def process_search(message: Message, state: FSMContext):
-    query = message.text.strip()
+    query = (message.text or "").strip()
+    if not query:
+        await message.answer("🔎 Введите текстовый запрос — например, название товара.")
+        return
     await state.clear()
 
     results = await search_products(query)

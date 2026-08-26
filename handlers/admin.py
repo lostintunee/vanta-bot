@@ -1,16 +1,18 @@
+import asyncio
 import html
 import logging
-import aiosqlite
 from aiogram import Router, F
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from config import ADMIN_IDS, DB_PATH, STAFF_IDS
+from config import ADMIN_IDS, STAFF_IDS, BROADCAST_DELAY
 from database import (
     get_all_users_count, get_all_user_ids, set_manager_username,
     get_top_categories, get_manager_username, get_payment_label, get_payment_address,
-    set_payment_label, set_payment_address, get_user
+    set_payment_label, set_payment_address, get_user, add_category, add_product,
+    category_exists, get_catalog_counts, delete_user
 )
 from keyboards import admin_reply_keyboard, main_reply_keyboard, delivery_mode_keyboard
 
@@ -47,11 +49,15 @@ def is_staff(user_id: int) -> bool:
     return user_id in STAFF_IDS
 
 def is_admin(user_id: int) -> bool:
-    # If no specific ADMIN_IDS set or default placeholder, check against config
-    if not ADMIN_IDS or ADMIN_IDS == [123456789]:
-        # Return False by default to restrict unauthorized access, or match list
-        return user_id in ADMIN_IDS
     return user_id in ADMIN_IDS
+
+async def require_text(message: Message) -> str | None:
+    """Return trimmed text, or tell the sender off for non-text input."""
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("❌ Здесь нужен текст. Попробуйте ещё раз:")
+        return None
+    return text
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
@@ -72,11 +78,7 @@ async def admin_stats(message: Message):
         return
     users_count = await get_all_users_count()
     manager = await get_manager_username()
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM categories") as c1:
-            cats_count = (await c1.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM products") as c2:
-            prods_count = (await c2.fetchone())[0]
+    cats_count, prods_count = await get_catalog_counts()
 
     stats_text = (
         "📊 <b>Статистика Бота:</b>\n\n"
@@ -103,7 +105,9 @@ async def start_set_manager(message: Message, state: FSMContext):
 async def process_set_manager(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    new_username = message.text.strip()
+    new_username = await require_text(message)
+    if new_username is None:
+        return
     if not new_username.startswith("@"):
         new_username = "@" + new_username
     await set_manager_username(new_username)
@@ -130,7 +134,10 @@ async def start_set_requisites(message: Message, state: FSMContext):
 async def process_set_requisites_label(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    await state.update_data(label=message.text.strip())
+    label = await require_text(message)
+    if label is None:
+        return
+    await state.update_data(label=label)
     await state.set_state(SetRequisitesState.address)
     await message.answer(
         "Шаг 2/2. Теперь пришлите сам адрес кошелька / номер карты / счёт — "
@@ -141,9 +148,11 @@ async def process_set_requisites_label(message: Message, state: FSMContext):
 async def process_set_requisites_address(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    address = await require_text(message)
+    if address is None:
+        return
     data = await state.get_data()
     label = data["label"]
-    address = message.text.strip()
     await set_payment_label(label)
     await set_payment_address(address)
     await state.clear()
@@ -164,7 +173,10 @@ async def start_add_category(message: Message, state: FSMContext):
 async def process_cat_name(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    await state.update_data(name=message.text.strip())
+    name = await require_text(message)
+    if name is None:
+        return
+    await state.update_data(name=name)
     await state.set_state(AddCategoryState.emoji)
     await message.answer("Введите значок/эмодзи категории:")
 
@@ -172,14 +184,14 @@ async def process_cat_name(message: Message, state: FSMContext):
 async def process_cat_emoji(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    emoji = await require_text(message)
+    if emoji is None:
+        return
     data = await state.get_data()
     cat_name = data["name"]
-    emoji = message.text.strip()
     await state.clear()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO categories (name, emoji) VALUES (?, ?)", (cat_name, emoji))
-        await db.commit()
+    await add_category(cat_name, emoji)
 
     await message.answer(f"✅ Категория «{html.escape(emoji)} {html.escape(cat_name)}» добавлена!", reply_markup=admin_reply_keyboard(), parse_mode="HTML")
 
@@ -203,10 +215,16 @@ async def start_add_product(message: Message, state: FSMContext):
 async def process_prod_cat_id(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    if not message.text.isdigit():
+    raw = await require_text(message)
+    if raw is None:
+        return
+    if not raw.isdigit():
         await message.answer("❌ Введите числовой ID категории:")
         return
-    await state.update_data(category_id=int(message.text.strip()))
+    if not await category_exists(int(raw)):
+        await message.answer("❌ Категории с таким ID нет. Введите ID из списка выше:")
+        return
+    await state.update_data(category_id=int(raw))
     await state.set_state(AddProductState.title)
     await message.answer("📌 Введите название товара:")
 
@@ -214,7 +232,10 @@ async def process_prod_cat_id(message: Message, state: FSMContext):
 async def process_prod_title(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    await state.update_data(title=message.text.strip())
+    title = await require_text(message)
+    if title is None:
+        return
+    await state.update_data(title=title)
     await state.set_state(AddProductState.description)
     await message.answer("📝 Введите описание товара:")
 
@@ -222,7 +243,10 @@ async def process_prod_title(message: Message, state: FSMContext):
 async def process_prod_desc(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    await state.update_data(description=message.text.strip())
+    description = await require_text(message)
+    if description is None:
+        return
+    await state.update_data(description=description)
     await state.set_state(AddProductState.price)
     await message.answer("💵 Введите цену в USD (например: 35.0):")
 
@@ -230,21 +254,22 @@ async def process_prod_desc(message: Message, state: FSMContext):
 async def process_prod_price(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    raw = await require_text(message)
+    if raw is None:
+        return
     try:
-        price = float(message.text.strip().replace(",", "."))
+        price = float(raw.replace(",", "."))
     except ValueError:
         await message.answer("❌ Неверный формат цены. Введите число:")
+        return
+    if price < 0:
+        await message.answer("❌ Цена не может быть отрицательной. Введите число:")
         return
 
     data = await state.get_data()
     await state.clear()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO products (category_id, title, description, price) VALUES (?, ?, ?, ?)",
-            (data["category_id"], data["title"], data["description"], price)
-        )
-        await db.commit()
+    await add_product(data["category_id"], data["title"], data["description"], price)
 
     await message.answer(f"✅ Товар «<b>{html.escape(data['title'])}</b>» за <code>{price:.1f}$</code> добавлен!", reply_markup=admin_reply_keyboard(), parse_mode="HTML")
 
@@ -357,23 +382,44 @@ async def start_broadcast(message: Message, state: FSMContext):
 async def process_broadcast(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    text = message.text
+    text = await require_text(message)
+    if text is None:
+        return
     await state.clear()
 
     user_ids = await get_all_user_ids()
     sent_count = 0
     fail_count = 0
+    dropped = []
 
-    await message.answer("🚀 Рассылка запущена...")
+    await message.answer(f"🚀 Рассылка запущена — получателей: {len(user_ids)}...")
     for uid in user_ids:
         try:
             await message.bot.send_message(uid, text, parse_mode="HTML")
             sent_count += 1
-        except Exception:
+        except TelegramRetryAfter as exc:
+            # Telegram told us the exact backoff; honour it and retry once.
+            await asyncio.sleep(exc.retry_after)
+            try:
+                await message.bot.send_message(uid, text, parse_mode="HTML")
+                sent_count += 1
+            except Exception:
+                fail_count += 1
+        except Exception as exc:
             fail_count += 1
+            if "bot was blocked" in str(exc) or "user is deactivated" in str(exc) or "chat not found" in str(exc):
+                dropped.append(uid)
+        # Stay under Telegram's ~30 msg/sec ceiling.
+        await asyncio.sleep(BROADCAST_DELAY)
 
-    await message.answer(
-        f"✅ <b>Рассылка завершена!</b>\n\nДоставлено: <code>{sent_count}</code>\nОшибок: <code>{fail_count}</code>",
-        reply_markup=admin_reply_keyboard(),
-        parse_mode="HTML"
+    for uid in dropped:
+        await delete_user(uid)
+
+    summary = (
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"Доставлено: <code>{sent_count}</code>\nОшибок: <code>{fail_count}</code>"
     )
+    if dropped:
+        summary += f"\nУдалено неактивных: <code>{len(dropped)}</code>"
+
+    await message.answer(summary, reply_markup=admin_reply_keyboard(), parse_mode="HTML")

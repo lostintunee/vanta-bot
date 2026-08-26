@@ -22,5 +22,11 @@ STAFF_IDS = set(ADMIN_IDS)
 if MANAGER_CHAT_ID:
     STAFF_IDS.add(MANAGER_CHAT_ID)
 
-DB_PATH = "bot_database.db"
+# Point this at a mounted volume in production — a container's own filesystem is
+# wiped on every deploy, taking users, orders and settings with it.
+DB_PATH = os.getenv("DB_PATH", "bot_database.db")
+
 RATE_LIMIT = 0.5
+
+# Telegram tolerates ~30 messages/sec; stay well under it during broadcasts.
+BROADCAST_DELAY = 0.05

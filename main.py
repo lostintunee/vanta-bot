@@ -1,9 +1,10 @@
 import asyncio
 import logging
+import os
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
-from config import BOT_TOKEN
-from database import init_db
+from config import BOT_TOKEN, DB_PATH
+from database import init_db, close_db
 from handlers import start, catalog, admin
 from middlewares import ThrottlingMiddleware
 
@@ -25,7 +26,7 @@ async def main():
         logger.error("BOT_TOKEN is not set correctly in config.py / .env!")
         return
 
-    logger.info("Initializing database...")
+    logger.info(f"Initializing database at {os.path.abspath(DB_PATH)} ...")
     await init_db()
 
     bot = Bot(token=BOT_TOKEN)
@@ -45,7 +46,11 @@ async def main():
     logger.info("Starting VANTA Shop Telegram Bot...")
     # Delete webhook to prevent conflicts before polling
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await close_db()
+        await bot.session.close()
 
 if __name__ == "__main__":
     try:

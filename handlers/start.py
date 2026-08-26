@@ -1,14 +1,22 @@
 import html
 from aiogram import Router, F
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
-from database import add_user, get_user, get_referrals_count, get_manager_username, get_user_orders
+from database import (
+    add_user, get_user, get_referrals_count, get_manager_username,
+    get_user_orders, count_user_orders
+)
 from keyboards import main_reply_keyboard, balance_inline_keyboard
 
 router = Router()
 
+ORDERS_PAGE_SIZE = 20
+
 @router.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
+    # /start is the universal escape hatch — never leave anyone stuck in a flow.
+    await state.clear()
     user_id = message.from_user.id
     username = message.from_user.username or ""
     first_name = message.from_user.first_name or "Гость"
@@ -103,16 +111,21 @@ async def show_balance(message: Message):
 @router.message(F.text.in_(["📦 Мои заказы", "Мои заказы", "Заказы"]))
 async def show_my_orders(message: Message):
     user_id = message.from_user.id
-    orders = await get_user_orders(user_id)
+    orders = await get_user_orders(user_id, limit=ORDERS_PAGE_SIZE)
     if not orders:
         await message.answer("У вас пока нет заказов.", parse_mode="HTML")
         return
-    
-    text = "📦 <b>История ваших заказов:</b>\n\n"
+
+    total_orders = await count_user_orders(user_id)
+    header = "📦 <b>История ваших заказов:</b>\n"
+    if total_orders > len(orders):
+        header += f"<i>Показаны последние {len(orders)} из {total_orders}.</i>\n"
+
+    text = header + "\n"
     for order_id, title, price, status, created_at in orders:
         text += f"🔹 <b>Заказ #{order_id}</b>\n"
         text += f"Товар: {html.escape(title)}\n"
         text += f"Сумма: {price:.1f}$ | Статус: <code>{status}</code>\n"
         text += f"Дата: {created_at}\n\n"
-    
+
     await message.answer(text, parse_mode="HTML")

@@ -1,124 +1,150 @@
+import asyncio
 import aiosqlite
 import logging
 from config import DB_PATH, DEFAULT_MANAGER
 
 logger = logging.getLogger(__name__)
 
+_db: aiosqlite.Connection | None = None
+_db_lock = asyncio.Lock()
+
+async def get_db() -> aiosqlite.Connection:
+    """One shared connection for the whole bot.
+
+    Opening a fresh connection per query meant a file open plus PRAGMA setup on
+    every button press; a single connection keeps the page cache warm and makes
+    `synchronous=NORMAL` actually stick (it is per-connection, not per-file).
+    """
+    global _db
+    if _db is None:
+        async with _db_lock:
+            if _db is None:
+                conn = await aiosqlite.connect(DB_PATH)
+                await conn.execute("PRAGMA journal_mode=WAL;")
+                await conn.execute("PRAGMA synchronous=NORMAL;")
+                await conn.execute("PRAGMA busy_timeout=5000;")
+                await conn.commit()
+                _db = conn
+    return _db
+
+async def close_db():
+    global _db
+    if _db is not None:
+        await _db.close()
+        _db = None
+
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        # Enable WAL mode for high concurrency and performance
-        await db.execute("PRAGMA journal_mode=WAL;")
-        await db.execute("PRAGMA synchronous=NORMAL;")
+    db = await get_db()
 
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            balance REAL DEFAULT 0.0,
-            ref_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        balance REAL DEFAULT 0.0,
+        ref_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS categories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            emoji TEXT DEFAULT '📁',
-            parent_id INTEGER DEFAULT NULL,
-            FOREIGN KEY (parent_id) REFERENCES categories (id)
-        )
-        """)
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        emoji TEXT DEFAULT '📁',
+        parent_id INTEGER DEFAULT NULL,
+        FOREIGN KEY (parent_id) REFERENCES categories (id)
+    )
+    """)
 
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category_id INTEGER,
-            title TEXT NOT NULL,
-            description TEXT,
-            price REAL NOT NULL,
-            stock INTEGER DEFAULT 50,
-            badge TEXT DEFAULT '',
-            is_available INTEGER DEFAULT 1,
-            FOREIGN KEY (category_id) REFERENCES categories (id)
-        )
-        """)
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS products (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category_id INTEGER,
+        title TEXT NOT NULL,
+        description TEXT,
+        price REAL NOT NULL,
+        stock INTEGER DEFAULT 50,
+        badge TEXT DEFAULT '',
+        is_available INTEGER DEFAULT 1,
+        FOREIGN KEY (category_id) REFERENCES categories (id)
+    )
+    """)
 
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS cart (
-            user_id INTEGER,
-            product_id INTEGER,
-            PRIMARY KEY (user_id, product_id),
-            FOREIGN KEY (product_id) REFERENCES products (id)
-        )
-        """)
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS cart (
+        user_id INTEGER,
+        product_id INTEGER,
+        PRIMARY KEY (user_id, product_id),
+        FOREIGN KEY (product_id) REFERENCES products (id)
+    )
+    """)
 
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            product_id INTEGER,
-            status TEXT DEFAULT 'В обработке',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        product_id INTEGER,
+        status TEXT DEFAULT 'В обработке',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-        """)
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """)
 
-        # Add Performance Indexes
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_cat_parent ON categories (parent_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_cat ON products (category_id, is_available);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_ref ON users (ref_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_orders_user ON orders (user_id);")
+    # Add Performance Indexes
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_cat_parent ON categories (parent_id);")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_cat ON products (category_id, is_available);")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_users_ref ON users (ref_id);")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_orders_user ON orders (user_id);")
 
+    await db.commit()
+
+    # Seed default settings if missing
+    async with db.execute("SELECT value FROM settings WHERE key = 'manager_username'") as cursor:
+        row = await cursor.fetchone()
+        if not row:
+            await db.execute("INSERT INTO settings (key, value) VALUES ('manager_username', ?)", (DEFAULT_MANAGER,))
+            await db.commit()
+
+    async with db.execute("SELECT value FROM settings WHERE key = 'payment_label'") as cursor:
+        row = await cursor.fetchone()
+        if not row:
+            # Migrate the old single-field value if it exists, so nothing is lost
+            async with db.execute("SELECT value FROM settings WHERE key = 'payment_requisites'") as old_cursor:
+                old_row = await old_cursor.fetchone()
+            label_default = old_row[0] if old_row else "Актуальные реквизиты уточняйте у менеджера."
+            await db.execute("INSERT INTO settings (key, value) VALUES ('payment_label', ?)", (label_default,))
+            await db.commit()
+
+    async with db.execute("SELECT value FROM settings WHERE key = 'payment_address'") as cursor:
+        row = await cursor.fetchone()
+        if not row:
+            await db.execute("INSERT INTO settings (key, value) VALUES ('payment_address', ?)", ("",))
+            await db.commit()
+
+    # Bump order numbering so new orders start from #7535 onward
+    order_number_floor = 7534
+    async with db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'orders'") as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        await db.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('orders', ?)", (order_number_floor,))
+        await db.commit()
+    elif row[0] < order_number_floor:
+        await db.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'orders'", (order_number_floor,))
         await db.commit()
 
-        # Seed default settings if missing
-        async with db.execute("SELECT value FROM settings WHERE key = 'manager_username'") as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                await db.execute("INSERT INTO settings (key, value) VALUES ('manager_username', ?)", (DEFAULT_MANAGER,))
-                await db.commit()
+    # Re-seed default structure if categories empty
+    async with db.execute("SELECT COUNT(*) FROM categories") as cursor:
+        count = (await cursor.fetchone())[0]
 
-        async with db.execute("SELECT value FROM settings WHERE key = 'payment_label'") as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                # Migrate the old single-field value if it exists, so nothing is lost
-                async with db.execute("SELECT value FROM settings WHERE key = 'payment_requisites'") as old_cursor:
-                    old_row = await old_cursor.fetchone()
-                label_default = old_row[0] if old_row else "Актуальные реквизиты уточняйте у менеджера."
-                await db.execute("INSERT INTO settings (key, value) VALUES ('payment_label', ?)", (label_default,))
-                await db.commit()
-
-        async with db.execute("SELECT value FROM settings WHERE key = 'payment_address'") as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                await db.execute("INSERT INTO settings (key, value) VALUES ('payment_address', ?)", ("",))
-                await db.commit()
-
-        # Bump order numbering so new orders start from #7535 onward
-        order_number_floor = 7534
-        async with db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'orders'") as cursor:
-            row = await cursor.fetchone()
-        if row is None:
-            await db.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('orders', ?)", (order_number_floor,))
-            await db.commit()
-        elif row[0] < order_number_floor:
-            await db.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'orders'", (order_number_floor,))
-            await db.commit()
-
-        # Re-seed default structure if categories empty
-        async with db.execute("SELECT COUNT(*) FROM categories") as cursor:
-            count = (await cursor.fetchone())[0]
-
-        if count == 0:
-            await seed_default_catalog(db)
+    if count == 0:
+        await seed_default_catalog(db)
 
 async def seed_default_catalog(db):
     top_cats = [
@@ -416,138 +442,184 @@ async def seed_default_catalog(db):
     await db.commit()
     logger.info("Database completely seeded.")
 
-# Optimized Helper functions
+# Helper functions (all share one connection — see get_db)
 async def add_user(user_id: int, username: str, first_name: str, ref_id: int = None):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO users (user_id, username, first_name, ref_id)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username = excluded.username,
-                first_name = excluded.first_name
-        """, (user_id, username, first_name, ref_id))
-        await db.commit()
+    db = await get_db()
+    await db.execute("""
+        INSERT INTO users (user_id, username, first_name, ref_id)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username = excluded.username,
+            first_name = excluded.first_name
+    """, (user_id, username, first_name, ref_id))
+    await db.commit()
 
 async def get_user(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id, username, first_name, balance, ref_id, created_at FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            return await cursor.fetchone()
+    db = await get_db()
+    async with db.execute("SELECT user_id, username, first_name, balance, ref_id, created_at FROM users WHERE user_id = ?", (user_id,)) as cursor:
+        return await cursor.fetchone()
+
+async def delete_user(user_id: int):
+    """Drop a user who blocked the bot so broadcasts stop retrying them."""
+    db = await get_db()
+    await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    await db.commit()
 
 async def get_referrals_count(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM users WHERE ref_id = ?", (user_id,)) as cursor:
-            res = await cursor.fetchone()
-            return res[0] if res else 0
+    db = await get_db()
+    async with db.execute("SELECT COUNT(*) FROM users WHERE ref_id = ?", (user_id,)) as cursor:
+        res = await cursor.fetchone()
+        return res[0] if res else 0
+
+async def _get_setting(key: str, default: str) -> str:
+    db = await get_db()
+    async with db.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cursor:
+        row = await cursor.fetchone()
+        return row[0] if row else default
+
+async def _set_setting(key: str, value: str):
+    db = await get_db()
+    await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    await db.commit()
 
 async def get_manager_username() -> str:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM settings WHERE key = 'manager_username'") as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else DEFAULT_MANAGER
+    return await _get_setting("manager_username", DEFAULT_MANAGER)
 
 async def set_manager_username(username: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('manager_username', ?)", (username,))
-        await db.commit()
+    await _set_setting("manager_username", username)
 
 async def get_payment_label() -> str:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM settings WHERE key = 'payment_label'") as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else "Актуальные реквизиты уточняйте у менеджера."
+    return await _get_setting("payment_label", "Актуальные реквизиты уточняйте у менеджера.")
 
 async def set_payment_label(text: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('payment_label', ?)", (text,))
-        await db.commit()
+    await _set_setting("payment_label", text)
 
 async def get_payment_address() -> str:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM settings WHERE key = 'payment_address'") as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else ""
+    return await _get_setting("payment_address", "")
 
 async def set_payment_address(text: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('payment_address', ?)", (text,))
-        await db.commit()
+    await _set_setting("payment_address", text)
 
 async def get_top_categories():
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, name, emoji FROM categories WHERE parent_id IS NULL ORDER BY id ASC") as cursor:
-            return await cursor.fetchall()
+    db = await get_db()
+    async with db.execute("SELECT id, name, emoji FROM categories WHERE parent_id IS NULL ORDER BY id ASC") as cursor:
+        return await cursor.fetchall()
 
 async def get_subcategories(parent_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, name, emoji FROM categories WHERE parent_id = ? ORDER BY id ASC", (parent_id,)) as cursor:
-            return await cursor.fetchall()
+    db = await get_db()
+    async with db.execute("SELECT id, name, emoji FROM categories WHERE parent_id = ? ORDER BY id ASC", (parent_id,)) as cursor:
+        return await cursor.fetchall()
 
 async def get_category(category_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, name, emoji, parent_id FROM categories WHERE id = ?", (category_id,)) as cursor:
-            return await cursor.fetchone()
+    db = await get_db()
+    async with db.execute("SELECT id, name, emoji, parent_id FROM categories WHERE id = ?", (category_id,)) as cursor:
+        return await cursor.fetchone()
+
+async def add_category(name: str, emoji: str):
+    db = await get_db()
+    await db.execute("INSERT INTO categories (name, emoji) VALUES (?, ?)", (name, emoji))
+    await db.commit()
 
 async def get_products_by_category(category_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, title, description, price, stock, badge FROM products WHERE category_id = ? AND is_available = 1 ORDER BY id ASC", (category_id,)) as cursor:
-            return await cursor.fetchall()
+    db = await get_db()
+    async with db.execute("SELECT id, title, description, price, stock, badge FROM products WHERE category_id = ? AND is_available = 1 ORDER BY id ASC", (category_id,)) as cursor:
+        return await cursor.fetchall()
 
 async def get_product(product_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, category_id, title, description, price, stock, badge FROM products WHERE id = ?", (product_id,)) as cursor:
-            return await cursor.fetchone()
+    db = await get_db()
+    async with db.execute("SELECT id, category_id, title, description, price, stock, badge FROM products WHERE id = ?", (product_id,)) as cursor:
+        return await cursor.fetchone()
+
+async def add_product(category_id: int, title: str, description: str, price: float):
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO products (category_id, title, description, price) VALUES (?, ?, ?, ?)",
+        (category_id, title, description, price)
+    )
+    await db.commit()
+
+async def category_exists(category_id: int) -> bool:
+    db = await get_db()
+    async with db.execute("SELECT 1 FROM categories WHERE id = ?", (category_id,)) as cursor:
+        return await cursor.fetchone() is not None
 
 async def search_products(query: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        pattern = f"%{query}%"
-        async with db.execute("SELECT id, title, price, stock, badge FROM products WHERE (title LIKE ? OR description LIKE ?) AND is_available = 1 LIMIT 20", (pattern, pattern)) as cursor:
-            return await cursor.fetchall()
+    db = await get_db()
+    # Escape LIKE wildcards so a literal % or _ does not match everything.
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped}%"
+    async with db.execute(
+        "SELECT id, title, price, stock, badge FROM products "
+        "WHERE (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\') AND is_available = 1 LIMIT 20",
+        (pattern, pattern)
+    ) as cursor:
+        return await cursor.fetchall()
 
 async def add_to_cart(user_id: int, product_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO cart (user_id, product_id) VALUES (?, ?)", (user_id, product_id))
-        await db.commit()
+    db = await get_db()
+    await db.execute("INSERT OR IGNORE INTO cart (user_id, product_id) VALUES (?, ?)", (user_id, product_id))
+    await db.commit()
 
 async def get_cart_items(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("""
-            SELECT p.id, p.title, p.price 
-            FROM cart c 
-            JOIN products p ON c.product_id = p.id 
-            WHERE c.user_id = ?
-        """, (user_id,)) as cursor:
-            return await cursor.fetchall()
+    db = await get_db()
+    async with db.execute("""
+        SELECT p.id, p.title, p.price
+        FROM cart c
+        JOIN products p ON c.product_id = p.id
+        WHERE c.user_id = ?
+    """, (user_id,)) as cursor:
+        return await cursor.fetchall()
 
 async def clear_cart(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM cart WHERE user_id = ?", (user_id,))
-        await db.commit()
+    db = await get_db()
+    await db.execute("DELETE FROM cart WHERE user_id = ?", (user_id,))
+    await db.commit()
 
-async def add_order(user_id: int, product_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+async def add_orders(user_id: int, product_ids) -> list[int]:
+    """Create every order of a checkout in one transaction."""
+    db = await get_db()
+    order_ids = []
+    for product_id in product_ids:
         cursor = await db.execute("INSERT INTO orders (user_id, product_id) VALUES (?, ?)", (user_id, product_id))
-        await db.commit()
-        return cursor.lastrowid
+        order_ids.append(cursor.lastrowid)
+    await db.commit()
+    return order_ids
 
-async def get_user_orders(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("""
-            SELECT o.id, p.title, p.price, o.status, o.created_at
-            FROM orders o
-            JOIN products p ON o.product_id = p.id
-            WHERE o.user_id = ?
-            ORDER BY o.id DESC
-        """, (user_id,)) as cursor:
-            return await cursor.fetchall()
+async def get_user_orders(user_id: int, limit: int = 20):
+    db = await get_db()
+    async with db.execute("""
+        SELECT o.id, p.title, p.price, o.status, o.created_at
+        FROM orders o
+        JOIN products p ON o.product_id = p.id
+        WHERE o.user_id = ?
+        ORDER BY o.id DESC
+        LIMIT ?
+    """, (user_id, limit)) as cursor:
+        return await cursor.fetchall()
+
+async def count_user_orders(user_id: int) -> int:
+    db = await get_db()
+    async with db.execute("SELECT COUNT(*) FROM orders WHERE user_id = ?", (user_id,)) as cursor:
+        row = await cursor.fetchone()
+        return row[0] if row else 0
 
 async def get_all_users_count() -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
+    db = await get_db()
+    async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+        row = await cursor.fetchone()
+        return row[0] if row else 0
 
 async def get_all_user_ids():
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM users") as cursor:
-            rows = await cursor.fetchall()
-            return [r[0] for r in rows]
+    db = await get_db()
+    async with db.execute("SELECT user_id FROM users") as cursor:
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]
+
+async def get_catalog_counts() -> tuple[int, int]:
+    """Categories and products in one round trip, for the admin stats screen."""
+    db = await get_db()
+    async with db.execute(
+        "SELECT (SELECT COUNT(*) FROM categories), (SELECT COUNT(*) FROM products)"
+    ) as cursor:
+        row = await cursor.fetchone()
+        return (row[0], row[1]) if row else (0, 0)
