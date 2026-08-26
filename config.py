@@ -17,5 +17,10 @@ for item in raw_admins.split(","):
 raw_manager_chat_id = os.getenv("MANAGER_CHAT_ID", "").strip()
 MANAGER_CHAT_ID = int(raw_manager_chat_id) if raw_manager_chat_id.isdigit() else None
 
+# Everyone who processes orders: owners plus the manager who receives notifications.
+STAFF_IDS = set(ADMIN_IDS)
+if MANAGER_CHAT_ID:
+    STAFF_IDS.add(MANAGER_CHAT_ID)
+
 DB_PATH = "bot_database.db"
 RATE_LIMIT = 0.5

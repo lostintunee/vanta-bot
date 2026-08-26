@@ -81,8 +81,19 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="➕ Добавить оффер"), KeyboardButton(text="📁 Добавить категорию")],
             [KeyboardButton(text="⚙️ Настроить менеджера"), KeyboardButton(text="💳 Реквизиты оплаты")],
-            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="🏠 Выход из админки")]
+            [KeyboardButton(text="📤 Выдать заказ"), KeyboardButton(text="📢 Рассылка")],
+            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🏠 Выход из админки")]
         ],
         resize_keyboard=True
     )
+
+def delivery_mode_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="✅ Завершить выдачу")]],
+        resize_keyboard=True
+    )
+
+def order_notification_keyboard(buyer_id: int, label: str = "📤 Выдать заказ") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=f"deliver_{buyer_id}")]
+    ])

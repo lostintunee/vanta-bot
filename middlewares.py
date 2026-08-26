@@ -2,7 +2,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
-from config import RATE_LIMIT
+from config import RATE_LIMIT, STAFF_IDS
 
 class ThrottlingMiddleware(BaseMiddleware):
     def __init__(self, limit: float = RATE_LIMIT):
@@ -22,7 +22,8 @@ class ThrottlingMiddleware(BaseMiddleware):
         elif isinstance(event, CallbackQuery) and event.from_user:
             user_id = event.from_user.id
 
-        if user_id:
+        # Staff send order contents as bursts of files; throttling would drop them.
+        if user_id and user_id not in STAFF_IDS:
             now = time.time()
             last_time = self.user_timestamps.get(user_id, 0)
             if now - last_time < self.limit:

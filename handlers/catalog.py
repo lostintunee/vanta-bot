@@ -10,7 +10,7 @@ from database import (
 )
 from keyboards import (
     top_categories_keyboard, subcategories_keyboard, products_inline_keyboard,
-    product_detail_keyboard, cart_inline_keyboard
+    product_detail_keyboard, cart_inline_keyboard, order_notification_keyboard
 )
 from notifications import notify_admins
 
@@ -137,7 +137,10 @@ async def callback_product_interest(callback: CallbackQuery):
         f"📦 Товар: <b>{html.escape(title)}</b> (ID <code>{p_id}</code>)\n"
         f"💰 Цена: {price:.2f}$"
     )
-    await notify_admins(callback.bot, text)
+    await notify_admins(
+        callback.bot, text,
+        order_notification_keyboard(callback.from_user.id, "✉️ Написать клиенту")
+    )
     await callback.answer("✅ Запрос отправлен менеджеру! Напишите ему, чтобы обсудить детали.", show_alert=True)
     await callback.message.answer(
         f"👨‍💻 Менеджер уведомлен о вашем интересе к «{html.escape(title)}».\n"
@@ -196,7 +199,7 @@ async def callback_checkout_cart(callback: CallbackQuery):
         f"💰 <b>Итого: {total:.2f}$</b>\n"
         f"🔖 Заказы: {order_tags}"
     )
-    await notify_admins(callback.bot, notify_text)
+    await notify_admins(callback.bot, notify_text, order_notification_keyboard(user_id))
     await clear_cart(user_id)
 
     manager = await get_manager_username()
