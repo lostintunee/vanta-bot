@@ -122,10 +122,11 @@ async def show_my_orders(message: Message):
         header += f"<i>Показаны последние {len(orders)} из {total_orders}.</i>\n"
 
     text = header + "\n"
-    for order_id, title, price, status, created_at in orders:
+    for order_id, title, price, status, created_at, quantity in orders:
         text += f"🔹 <b>Заказ #{order_id}</b>\n"
-        text += f"Товар: {html.escape(title)}\n"
-        text += f"Сумма: {price:.1f}$ | Статус: <code>{status}</code>\n"
+        text += f"Товар: {html.escape(title)}"
+        text += f" × {quantity}\n" if quantity > 1 else "\n"
+        text += f"Сумма: {price * quantity:.2f}$ | Статус: <code>{status}</code>\n"
         text += f"Дата: {created_at}\n\n"
 
     await message.answer(text, parse_mode="HTML")

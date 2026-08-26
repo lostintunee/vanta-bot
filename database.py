@@ -33,6 +33,13 @@ async def close_db():
         await _db.close()
         _db = None
 
+async def _add_column_if_missing(db, table: str, column: str, definition: str):
+    async with db.execute(f"PRAGMA table_info({table})") as cursor:
+        columns = {row[1] for row in await cursor.fetchall()}
+    if column not in columns:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        logger.info(f"Migrated {table}: added {column}")
+
 async def init_db():
     db = await get_db()
 
@@ -75,6 +82,7 @@ async def init_db():
     CREATE TABLE IF NOT EXISTS cart (
         user_id INTEGER,
         product_id INTEGER,
+        quantity INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY (user_id, product_id),
         FOREIGN KEY (product_id) REFERENCES products (id)
     )
@@ -85,10 +93,15 @@ async def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         product_id INTEGER,
+        quantity INTEGER NOT NULL DEFAULT 1,
         status TEXT DEFAULT 'В обработке',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
+
+    # Databases created before quantities existed need the column added.
+    await _add_column_if_missing(db, "cart", "quantity", "INTEGER NOT NULL DEFAULT 1")
+    await _add_column_if_missing(db, "orders", "quantity", "INTEGER NOT NULL DEFAULT 1")
 
     await db.execute("""
     CREATE TABLE IF NOT EXISTS settings (
@@ -555,18 +568,54 @@ async def search_products(query: str):
     ) as cursor:
         return await cursor.fetchall()
 
-async def add_to_cart(user_id: int, product_id: int):
+async def add_to_cart(user_id: int, product_id: int, quantity: int = 1):
+    """Add to the cart, stacking onto whatever is already there."""
     db = await get_db()
-    await db.execute("INSERT OR IGNORE INTO cart (user_id, product_id) VALUES (?, ?)", (user_id, product_id))
+    await db.execute("""
+        INSERT INTO cart (user_id, product_id, quantity) VALUES (?, ?, ?)
+        ON CONFLICT(user_id, product_id) DO UPDATE SET quantity = quantity + excluded.quantity
+    """, (user_id, product_id, quantity))
+    await db.commit()
+
+async def set_cart_quantity(user_id: int, product_id: int, quantity: int):
+    """Set an exact quantity; anything below 1 removes the line."""
+    db = await get_db()
+    if quantity < 1:
+        await db.execute("DELETE FROM cart WHERE user_id = ? AND product_id = ?", (user_id, product_id))
+    else:
+        await db.execute(
+            "UPDATE cart SET quantity = ? WHERE user_id = ? AND product_id = ?",
+            (quantity, user_id, product_id)
+        )
+    await db.commit()
+
+async def change_cart_quantity(user_id: int, product_id: int, delta: int) -> int:
+    """Nudge a line up or down. Returns the resulting quantity (0 = removed)."""
+    db = await get_db()
+    async with db.execute(
+        "SELECT quantity FROM cart WHERE user_id = ? AND product_id = ?", (user_id, product_id)
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return 0
+    new_quantity = row[0] + delta
+    await set_cart_quantity(user_id, product_id, new_quantity)
+    return max(new_quantity, 0)
+
+async def remove_from_cart(user_id: int, product_id: int):
+    db = await get_db()
+    await db.execute("DELETE FROM cart WHERE user_id = ? AND product_id = ?", (user_id, product_id))
     await db.commit()
 
 async def get_cart_items(user_id: int):
+    """Rows of (product_id, title, price, quantity)."""
     db = await get_db()
     async with db.execute("""
-        SELECT p.id, p.title, p.price
+        SELECT p.id, p.title, p.price, c.quantity
         FROM cart c
         JOIN products p ON c.product_id = p.id
         WHERE c.user_id = ?
+        ORDER BY p.id ASC
     """, (user_id,)) as cursor:
         return await cursor.fetchall()
 
@@ -575,12 +624,18 @@ async def clear_cart(user_id: int):
     await db.execute("DELETE FROM cart WHERE user_id = ?", (user_id,))
     await db.commit()
 
-async def add_orders(user_id: int, product_ids) -> list[int]:
-    """Create every order of a checkout in one transaction."""
+async def add_orders(user_id: int, items) -> list[int]:
+    """Create every order of a checkout in one transaction.
+
+    `items` is an iterable of (product_id, quantity).
+    """
     db = await get_db()
     order_ids = []
-    for product_id in product_ids:
-        cursor = await db.execute("INSERT INTO orders (user_id, product_id) VALUES (?, ?)", (user_id, product_id))
+    for product_id, quantity in items:
+        cursor = await db.execute(
+            "INSERT INTO orders (user_id, product_id, quantity) VALUES (?, ?, ?)",
+            (user_id, product_id, quantity)
+        )
         order_ids.append(cursor.lastrowid)
     await db.commit()
     return order_ids
@@ -588,7 +643,7 @@ async def add_orders(user_id: int, product_ids) -> list[int]:
 async def get_user_orders(user_id: int, limit: int = 20):
     db = await get_db()
     async with db.execute("""
-        SELECT o.id, p.title, p.price, o.status, o.created_at
+        SELECT o.id, p.title, p.price, o.status, o.created_at, o.quantity
         FROM orders o
         JOIN products p ON o.product_id = p.id
         WHERE o.user_id = ?

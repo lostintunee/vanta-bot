@@ -7,7 +7,8 @@ from aiogram.fsm.state import State, StatesGroup
 from database import (
     get_top_categories, get_subcategories, get_category, get_products_by_category,
     get_product, get_manager_username, search_products, add_to_cart, get_cart_items,
-    clear_cart, add_orders, get_payment_label, get_payment_address
+    clear_cart, add_orders, get_payment_label, get_payment_address,
+    change_cart_quantity, remove_from_cart
 )
 from keyboards import (
     top_categories_keyboard, subcategories_keyboard, products_inline_keyboard,
@@ -127,7 +128,14 @@ async def callback_add_cart(callback: CallbackQuery):
     product_id = int(callback.data.split("_")[1])
     user_id = callback.from_user.id
     await add_to_cart(user_id, product_id)
-    await callback.answer("✅ Товар добавлен в корзину!", show_alert=True)
+
+    quantity = next(
+        (q for p_id, _, _, q in await get_cart_items(user_id) if p_id == product_id), 1
+    )
+    if quantity > 1:
+        await callback.answer(f"✅ В корзине: {quantity} шт.", show_alert=True)
+    else:
+        await callback.answer("✅ Товар добавлен в корзину!", show_alert=True)
 
 @router.callback_query(F.data.startswith("interest_"))
 async def callback_product_interest(callback: CallbackQuery):
@@ -160,31 +168,55 @@ async def callback_product_interest(callback: CallbackQuery):
         disable_web_page_preview=True
     )
 
+def render_cart(items):
+    """Build the cart message and keyboard from cart rows."""
+    if not items:
+        return "🛒 <b>Корзина пустая.</b>", cart_inline_keyboard()
+
+    total = sum(price * quantity for _, _, price, quantity in items)
+    units = sum(quantity for *_, quantity in items)
+
+    text = "🛒 <b>Ваша корзина:</b>\n\n"
+    for idx, (_p_id, title, price, quantity) in enumerate(items, 1):
+        line_total = price * quantity
+        text += f"{idx}. <b>{html.escape(title)}</b>\n"
+        text += f"    {quantity} × {price:.2f}$ = {line_total:.2f}$\n"
+    text += f"\n📦 <b>Позиций:</b> {units}"
+    text += f"\n💰 <b>Итого:</b> {total:.2f}$"
+    return text, cart_inline_keyboard(items)
+
 @router.message(F.text.in_(["🛒 Корзина", "Корзина"]))
 async def show_cart(message: Message, state: FSMContext):
     await state.clear()
-    user_id = message.from_user.id
-    items = await get_cart_items(user_id)
+    items = await get_cart_items(message.from_user.id)
+    text, markup = render_cart(items)
+    await message.answer(text, reply_markup=markup, parse_mode="HTML")
 
-    if not items:
-        await message.answer(
-            "🛒 <b>Корзина пустая.</b>",
-            reply_markup=cart_inline_keyboard(cart_empty=True),
-            parse_mode="HTML"
-        )
-        return
+async def refresh_cart(callback: CallbackQuery):
+    items = await get_cart_items(callback.from_user.id)
+    text, markup = render_cart(items)
+    await safe_edit(callback, text, markup)
 
-    total = sum(item[2] for item in items)
-    cart_text = "🛒 <b>Ваша корзина:</b>\n\n"
-    for idx, (p_id, title, price) in enumerate(items, 1):
-        cart_text += f"{idx}. <b>{html.escape(title)}</b> — {price:.1f}$\n"
-    cart_text += f"\n💰 <b>Итого:</b> {total:.1f}$"
+@router.callback_query(F.data.startswith("cartinc_"))
+async def callback_cart_increase(callback: CallbackQuery):
+    product_id = int(callback.data.split("_")[1])
+    await change_cart_quantity(callback.from_user.id, product_id, 1)
+    await callback.answer()
+    await refresh_cart(callback)
 
-    await message.answer(
-        cart_text,
-        reply_markup=cart_inline_keyboard(cart_empty=False),
-        parse_mode="HTML"
-    )
+@router.callback_query(F.data.startswith("cartdec_"))
+async def callback_cart_decrease(callback: CallbackQuery):
+    product_id = int(callback.data.split("_")[1])
+    left = await change_cart_quantity(callback.from_user.id, product_id, -1)
+    await callback.answer("Позиция удалена из корзины" if left == 0 else None)
+    await refresh_cart(callback)
+
+@router.callback_query(F.data.startswith("cartdel_"))
+async def callback_cart_remove(callback: CallbackQuery):
+    product_id = int(callback.data.split("_")[1])
+    await remove_from_cart(callback.from_user.id, product_id)
+    await callback.answer("🗑 Позиция удалена")
+    await refresh_cart(callback)
 
 @router.callback_query(F.data == "cart_checkout_empty")
 async def callback_cart_empty_checkout(callback: CallbackQuery):
@@ -198,9 +230,12 @@ async def callback_checkout_cart(callback: CallbackQuery):
         await callback.answer("Корзина пустая!", show_alert=True)
         return
 
-    order_ids = await add_orders(user_id, [p_id for p_id, _, _ in items])
-    total = sum(item[2] for item in items)
-    items_lines = "\n".join(f"• {html.escape(title)} — {price:.2f}$" for _, title, price in items)
+    order_ids = await add_orders(user_id, [(p_id, quantity) for p_id, _, _, quantity in items])
+    total = sum(price * quantity for _, _, price, quantity in items)
+    items_lines = "\n".join(
+        f"• {html.escape(title)} — {quantity} × {price:.2f}$ = {price * quantity:.2f}$"
+        for _, title, price, quantity in items
+    )
     order_tags = ", ".join(f"#{oid}" for oid in order_ids)
 
     notify_text = (
@@ -239,7 +274,7 @@ async def callback_clear_cart(callback: CallbackQuery):
     user_id = callback.from_user.id
     await clear_cart(user_id)
     await callback.answer("🗑 Корзина очищена!", show_alert=True)
-    await safe_edit(callback, "🛒 <b>Корзина пустая.</b>", cart_inline_keyboard(cart_empty=True))
+    await safe_edit(callback, "🛒 <b>Корзина пустая.</b>", cart_inline_keyboard())
 
 @router.callback_query(F.data == "promocode")
 async def callback_promocode(callback: CallbackQuery):

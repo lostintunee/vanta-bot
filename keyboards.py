@@ -52,19 +52,35 @@ def product_detail_keyboard(product_id: int, category_id: int, manager_username:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def cart_inline_keyboard(cart_empty: bool = False) -> InlineKeyboardMarkup:
-    if cart_empty:
+# Telegram caps an inline keyboard at 100 buttons; each cart line costs four.
+MAX_CART_LINES_WITH_CONTROLS = 20
+
+def cart_inline_keyboard(items=None) -> InlineKeyboardMarkup:
+    """Cart keyboard with a ➖/➕ row per line so quantities can be adjusted."""
+    if not items:
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Оформить", callback_data="cart_checkout_empty"), InlineKeyboardButton(text="🗑 Очистить", callback_data="clear_cart")],
             [InlineKeyboardButton(text="🎟 Промокод", callback_data="promocode")],
             [InlineKeyboardButton(text="🛍 В каталог", callback_data="back_to_top_cats")]
         ])
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Оформить", callback_data="checkout_cart"), InlineKeyboardButton(text="🗑 Очистить", callback_data="clear_cart")],
-        [InlineKeyboardButton(text="🎟 Промокод", callback_data="promocode")],
-        [InlineKeyboardButton(text="🛍 В каталог", callback_data="back_to_top_cats")]
+    buttons = []
+    for p_id, title, _price, quantity in items[:MAX_CART_LINES_WITH_CONTROLS]:
+        short = title if len(title) <= 22 else title[:21] + "…"
+        buttons.append([
+            InlineKeyboardButton(text="➖", callback_data=f"cartdec_{p_id}"),
+            InlineKeyboardButton(text=f"{short} · {quantity}", callback_data=f"prod_{p_id}"),
+            InlineKeyboardButton(text="➕", callback_data=f"cartinc_{p_id}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"cartdel_{p_id}"),
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(text="✅ Оформить", callback_data="checkout_cart"),
+        InlineKeyboardButton(text="🗑 Очистить", callback_data="clear_cart"),
     ])
+    buttons.append([InlineKeyboardButton(text="🎟 Промокод", callback_data="promocode")])
+    buttons.append([InlineKeyboardButton(text="🛍 В каталог", callback_data="back_to_top_cats")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def balance_inline_keyboard(manager_username: str, bot_username: str, user_id: int) -> InlineKeyboardMarkup:
     clean_manager = manager_username.replace("@", "")
